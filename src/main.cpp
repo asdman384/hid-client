@@ -1,11 +1,28 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 
+// Joystick HID report format
+typedef struct __attribute__((__packed__))
+{
+    uint8_t x;
+    uint8_t y;
+    uint8_t z;
+    uint8_t rz;
+    uint8_t brake;
+    uint8_t accel;
+    uint8_t hat;
+    uint16_t buttons;
+} joystick_t;
+
 static const char HID_SERVICE[] = "1812";
+static const char HID_REPORT_MAP[] = "2A4B";
+static const char HID_REPORT_DATA[] = "2A4D";
 
 static const NimBLEAdvertisedDevice *advDevice;
 static bool doConnect = false;
 static uint32_t scanTimeMs = 5000; /** scan time in milliseconds, 0 = scan forever */
+static bool deviceNewData = false;
+static joystick_t Joystick_Report;
 
 /**  None of these are required as they will be handled by the library with defaults. **
  **                       Remove as you see fit for your needs                        */
@@ -115,6 +132,8 @@ class ScanCallbacks : public NimBLEScanCallbacks
 } scanCallbacks;
 
 /** Notification / Indication receiving handler callback */
+// WARNING: This device has 4 Characteristics = 0x2a4d but with different
+// handle values.
 void notifyCB(NimBLERemoteCharacteristic *pRemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
     std::string str = (isNotify == true) ? "Notification" : "Indication";
@@ -122,8 +141,19 @@ void notifyCB(NimBLERemoteCharacteristic *pRemoteCharacteristic, uint8_t *pData,
     str += pRemoteCharacteristic->getClient()->getPeerAddress().toString();
     str += ": Service = " + pRemoteCharacteristic->getRemoteService()->getUUID().toString();
     str += ", Characteristic = " + pRemoteCharacteristic->getUUID().toString();
-    str += ", Value = " + std::string((char *)pData, length);
+    // str += ", Value = " + std::string((char *)pData, length);
+    str += ", Value = ";
+    for (size_t i = 0; i < length; i++)
+    {
+        uint8_t d = pData[i];
+        str += std::to_string(d) + ", ";
+        // Serial.print(d + ' ');
+    }
+
     Serial.printf("%s\n", str.c_str());
+
+    memcpy(&Joystick_Report, pData, sizeof(Joystick_Report));
+    deviceNewData = true;
 }
 
 /** Handles the provisioning of clients and connects / interfaces with the server */
@@ -177,9 +207,9 @@ bool connectToServer()
          *  Set initial connection parameters:
          *  These settings are safe for 3 clients to connect reliably, can go faster if you have less
          *  connections. Timeout should be a multiple of the interval, minimum is 100ms.
-         *  Min interval: 12 * 1.25ms = 15, Max interval: 12 * 1.25ms = 15, 0 latency, 150 * 10ms = 1500ms timeout
+         *  Min interval: 12 * 1.25ms = 15, Max interval: 12 * 1.25ms = 15, 0 latency, 51 * 10ms = 510ms timeout
          */
-        pClient->setConnectionParams(12, 12, 0, 150);
+        pClient->setConnectionParams(12, 12, 0, 51);
 
         /** Set how long we are willing to wait for the connection to complete (milliseconds), default is 30000. */
         pClient->setConnectTimeout(5 * 1000);
@@ -202,126 +232,41 @@ bool connectToServer()
         }
     }
 
-    Serial.printf("Connected to: %s RSSI: %d\n", pClient->getPeerAddress().toString().c_str(), pClient->getRssi());
+    Serial.printf("Connected to: %s RSSI: %d\n",
+                  pClient->getPeerAddress().toString().c_str(),
+                  pClient->getRssi());
 
     /** Now we can read/write/subscribe the characteristics of the services we are interested in */
     NimBLERemoteService *pSvc = nullptr;
-    NimBLERemoteCharacteristic *pChr = nullptr;
-    NimBLERemoteDescriptor *pDsc = nullptr;
 
-    pSvc = pClient->getService("DEAD");
+    pSvc = pClient->getService(HID_SERVICE);
+    /** make sure it's not null */
     if (pSvc)
     {
-        pChr = pSvc->getCharacteristic("BEEF");
-    }
-
-    if (pChr)
-    {
-        if (pChr->canRead())
+        // Subscribe to characteristics HID_REPORT_DATA.
+        // One real device reports 2 with the same UUID but
+        // different handles. Using getCharacteristic() results
+        // in subscribing to only one.
+        const std::vector<NimBLERemoteCharacteristic *> &charvector = pSvc->getCharacteristics(true);
+        for (auto &it : charvector)
         {
-            Serial.printf("%s Value: %s\n", pChr->getUUID().toString().c_str(), pChr->readValue().c_str());
-        }
+            if (it->getUUID() == NimBLEUUID(HID_REPORT_DATA))
+            {
+                Serial.printf("Subscribe to characteristics HID_REPORT_DATA: %s  \n",
+                              it->toString().c_str());
 
-        if (pChr->canWrite())
-        {
-            if (pChr->writeValue("Tasty"))
-            {
-                Serial.printf("Wrote new value to: %s\n", pChr->getUUID().toString().c_str());
-            }
-            else
-            {
-                pClient->disconnect();
-                return false;
-            }
-
-            if (pChr->canRead())
-            {
-                Serial.printf("The value of: %s is now: %s\n", pChr->getUUID().toString().c_str(), pChr->readValue().c_str());
-            }
-        }
-
-        if (pChr->canNotify())
-        {
-            if (!pChr->subscribe(true, notifyCB))
-            {
-                pClient->disconnect();
-                return false;
-            }
-        }
-        else if (pChr->canIndicate())
-        {
-            /** Send false as first argument to subscribe to indications instead of notifications */
-            if (!pChr->subscribe(false, notifyCB))
-            {
-                pClient->disconnect();
-                return false;
-            }
-        }
-    }
-    else
-    {
-        Serial.printf("DEAD service not found.\n");
-    }
-
-    pSvc = pClient->getService("BAAD");
-    if (pSvc)
-    {
-        pChr = pSvc->getCharacteristic("F00D");
-        if (pChr)
-        {
-            if (pChr->canRead())
-            {
-                Serial.printf("%s Value: %s\n", pChr->getUUID().toString().c_str(), pChr->readValue().c_str());
-            }
-
-            pDsc = pChr->getDescriptor(NimBLEUUID("C01D"));
-            if (pDsc)
-            {
-                Serial.printf("Descriptor: %s  Value: %s\n", pDsc->getUUID().toString().c_str(), pDsc->readValue().c_str());
-            }
-
-            if (pChr->canWrite())
-            {
-                if (pChr->writeValue("No tip!"))
+                if (it->canNotify())
                 {
-                    Serial.printf("Wrote new value to: %s\n", pChr->getUUID().toString().c_str());
-                }
-                else
-                {
-                    pClient->disconnect();
-                    return false;
-                }
-
-                if (pChr->canRead())
-                {
-                    Serial.printf("The value of: %s is now: %s\n",
-                                  pChr->getUUID().toString().c_str(),
-                                  pChr->readValue().c_str());
-                }
-            }
-
-            if (pChr->canNotify())
-            {
-                if (!pChr->subscribe(true, notifyCB))
-                {
-                    pClient->disconnect();
-                    return false;
-                }
-            }
-            else if (pChr->canIndicate())
-            {
-                /** Send false as first argument to subscribe to indications instead of notifications */
-                if (!pChr->subscribe(false, notifyCB))
-                {
-                    pClient->disconnect();
-                    return false;
+                    if (!it->subscribe(true, notifyCB))
+                    {
+                        /** Disconnect if subscribe failed */
+                        Serial.println("subscribe notification failed");
+                        pClient->disconnect();
+                        return false;
+                    }
                 }
             }
         }
-    }
-    else
-    {
-        Serial.printf("BAAD service not found.\n");
     }
 
     Serial.printf("Done with this device!\n");
@@ -333,8 +278,8 @@ void setup()
     Serial.begin(115200);
     Serial.printf("Starting NimBLE Client\n");
 
-    /** Initialize NimBLE and set the device name */
-    NimBLEDevice::init("NimBLE-Client");
+    /** Initialize NimBLE, no device name spcified as we are not advertising */
+    NimBLEDevice::init("");
 
     /**
      * Set the IO capabilities of the device, each option will trigger a different pairing method.
@@ -350,12 +295,17 @@ void setup()
      *  no bonding, no man in the middle protection, BLE secure connections.
      *  These are the default values, only shown here for demonstration.
      */
-    // NimBLEDevice::setSecurityAuth(false, false, true);
+    NimBLEDevice::setSecurityAuth(true, false, true);
 
-    NimBLEDevice::setSecurityAuth(/*BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_MITM |*/ BLE_SM_PAIR_AUTHREQ_SC);
+    // NimBLEDevice::setSecurityAuth(/*BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_MITM |*/ BLE_SM_PAIR_AUTHREQ_SC);
 
     /** Optional: set the transmit power */
-    NimBLEDevice::setPower(3); /** 3dbm */
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9); /** +9db */
+
+    /** Optional: set any devices you don't want to get advertisments from */
+    // NimBLEDevice::addIgnored(NimBLEAddress ("aa:bb:cc:dd:ee:ff"));
+
+    /** create new scan */
     NimBLEScan *pScan = NimBLEDevice::getScan();
 
     /** Set the callbacks to call when scan events occur, no duplicates */
@@ -392,8 +342,42 @@ void loop()
         else
         {
             Serial.printf("Failed to connect, starting scan\n");
+            NimBLEDevice::getScan()->start(scanTimeMs, false, true);
         }
+    }
 
-        NimBLEDevice::getScan()->start(scanTimeMs, false, true);
+    if (deviceNewData)
+    {
+        static uint8_t last_x;
+        static uint8_t last_y;
+        // movement_callback_t f = this->get_movement_callback();
+        // if (f)
+        // {
+        if ((last_x != Joystick_Report.x) || (last_y != Joystick_Report.y))
+        {
+            // (*f)(Joystick_Report.x, Joystick_Report.y);
+            last_x = Joystick_Report.x;
+            last_y = Joystick_Report.y;
+            // Serial.printf("x=%d, y=%d\n", last_x, last_y);
+        }
+        // }
+
+        static uint16_t last_buttons = 0;
+        uint16_t changed = last_buttons ^ Joystick_Report.buttons;
+        uint16_t buttons = Joystick_Report.buttons;
+        for (size_t i = 0; i < 16; i++)
+        {
+            // button_callback_t f = this->get_button_callback(i);
+            if ((changed & 1))
+            {
+                // (*f)(buttons & 1);
+                // Serial.printf("button=%d\n", buttons);
+            }
+            changed >>= 1;
+            buttons >>= 1;
+        }
+        last_buttons = Joystick_Report.buttons;
+
+        deviceNewData = false;
     }
 }
