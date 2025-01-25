@@ -1,18 +1,11 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 
-// Joystick HID report format
-typedef struct __attribute__((__packed__))
-{
-    uint8_t x;
-    uint8_t y;
-    uint8_t z;
-    uint8_t rz;
-    uint8_t brake;
-    uint8_t accel;
-    uint8_t hat;
-    uint16_t buttons;
-} joystick_t;
+// Define the control inputs
+#define MOT_B2_PIN D0 // IN 4
+#define MOT_B1_PIN D1 // IN 3
+#define MOT_A2_PIN D2 // IN 2
+#define MOT_A1_PIN D3 // IN 1
 
 static const char HID_SERVICE[] = "1812";
 static const char HID_REPORT_MAP[] = "2A4B";
@@ -21,8 +14,16 @@ static const char HID_REPORT_DATA[] = "2A4D";
 static const NimBLEAdvertisedDevice *advDevice;
 static bool doConnect = false;
 static uint32_t scanTimeMs = 5000; /** scan time in milliseconds, 0 = scan forever */
-static bool deviceNewData = false;
-static joystick_t Joystick_Report;
+// static bool deviceNewData = false;
+static bool startB = false;
+static int yB = 0;
+static int xB = 0;
+static int lp = 0;
+static int rp = 0;
+
+void disconnectCB();
+void set_motor_pwm(int pwm, int IN1_PIN, int IN2_PIN);
+void set_motor_currents(int pwm_A, int pwm_B);
 
 /**  None of these are required as they will be handled by the library with defaults. **
  **                       Remove as you see fit for your needs                        */
@@ -42,6 +43,7 @@ class ClientCallbacks : public NimBLEClientCallbacks
 
     void onDisconnect(NimBLEClient *pClient, int reason) override
     {
+        disconnectCB();
         Serial.printf("%s Disconnected, reason = %d - Starting scan\n", pClient->getPeerAddress().toString().c_str(), reason);
         NimBLEDevice::getScan()->start(scanTimeMs, false, true);
     }
@@ -131,29 +133,50 @@ class ScanCallbacks : public NimBLEScanCallbacks
     }
 } scanCallbacks;
 
+void disconnectCB()
+{
+    set_motor_currents(0, 0);
+}
+
 /** Notification / Indication receiving handler callback */
 // WARNING: This device has 4 Characteristics = 0x2a4d but with different
 // handle values.
 void notifyCB(NimBLERemoteCharacteristic *pRemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
     std::string str = (isNotify == true) ? "Notification" : "Indication";
-    str += " from ";
-    str += pRemoteCharacteristic->getClient()->getPeerAddress().toString();
-    str += ": Service = " + pRemoteCharacteristic->getRemoteService()->getUUID().toString();
-    str += ", Characteristic = " + pRemoteCharacteristic->getUUID().toString();
-    // str += ", Value = " + std::string((char *)pData, length);
+    str += " from handle ";
+    str += std::to_string(pRemoteCharacteristic->getHandle());
+    // str += ": Service = " + pRemoteCharacteristic->getRemoteService()->getUUID().toString();
+    // str += ", Characteristic = " + pRemoteCharacteristic->getUUID().toString();
     str += ", Value = ";
     for (size_t i = 0; i < length; i++)
     {
         uint8_t d = pData[i];
         str += std::to_string(d) + ", ";
-        // Serial.print(d + ' ');
     }
+
+    startB = pData[5] == 8;
+
+    if (pData[0] == 128)
+        yB = 0;
+    else if (pData[0] < 128)
+        yB = (abs(pData[0] - 128) << 1) - 1;
+    else
+        yB = (-(pData[0] - 128) << 1) - 1;
+
+    if (pData[1] == 128)
+        xB = 0;
+    else if (pData[1] < 128)
+        xB = (abs(pData[1] - 128) << 1) - 1;
+    else
+        xB = (-(pData[1] - 128) << 1) - 1;
+
+    str += ", yB = " + std::to_string(yB);
+    str += ", xB = " + std::to_string(xB);
 
     Serial.printf("%s\n", str.c_str());
 
-    memcpy(&Joystick_Report, pData, sizeof(Joystick_Report));
-    deviceNewData = true;
+    // deviceNewData = true;
 }
 
 /** Handles the provisioning of clients and connects / interfaces with the server */
@@ -273,9 +296,8 @@ bool connectToServer()
     return true;
 }
 
-void setup()
+void setupBLE()
 {
-    Serial.begin(115200);
     Serial.printf("Starting NimBLE Client\n");
 
     /** Initialize NimBLE, no device name spcified as we are not advertising */
@@ -326,10 +348,61 @@ void setup()
     Serial.printf("Scanning for peripherals\n");
 }
 
+void setupMotors()
+{
+    // Set all the motor control inputs to OUTPUT
+    pinMode(MOT_A1_PIN, OUTPUT);
+    pinMode(MOT_A2_PIN, OUTPUT);
+    pinMode(MOT_B1_PIN, OUTPUT);
+    pinMode(MOT_B2_PIN, OUTPUT);
+
+    // Turn off motors - Initial state
+    analogWrite(MOT_A1_PIN, LOW);
+    analogWrite(MOT_A2_PIN, LOW);
+    analogWrite(MOT_B1_PIN, LOW);
+    analogWrite(MOT_B2_PIN, LOW);
+}
+
+void set_motor_pwm(int pwm, int IN1_PIN, int IN2_PIN)
+{
+    if (pwm < 0)
+    {
+        analogWrite(IN1_PIN, abs(pwm));
+        analogWrite(IN2_PIN, 0);
+    }
+    else
+    {
+        analogWrite(IN1_PIN, 0);
+        analogWrite(IN2_PIN, pwm);
+    }
+}
+
+void set_motor_currents(int pwm_A, int pwm_B)
+{
+    set_motor_pwm(pwm_A, MOT_A1_PIN, MOT_A2_PIN);
+    set_motor_pwm(pwm_B, MOT_B1_PIN, MOT_B2_PIN);
+}
+
+void beep(uint8_t tone, int duration)
+{
+    set_motor_currents(tone, tone);
+    delay(duration);
+    set_motor_currents(0, 0);
+}
+
+void setup()
+{
+    Serial.begin(115200);
+    setupMotors();
+    setupBLE();
+
+    beep(20, 100);
+}
+
 void loop()
 {
     /** Loop here until we find a device we want to connect to */
-    delay(10);
+    delay(20);
 
     if (doConnect)
     {
@@ -337,7 +410,10 @@ void loop()
         /** Found a device we want to connect to, do it now */
         if (connectToServer())
         {
-            Serial.printf("Success! we should now be getting notifications, scanning for more!\n");
+            beep(7, 100);
+            beep(25, 200);
+            beep(7, 100);
+            Serial.printf("Success! we should now be getting notifications!\n");
         }
         else
         {
@@ -346,38 +422,28 @@ void loop()
         }
     }
 
-    if (deviceNewData)
+    // set_motor_currents(yB, yB);
+
+    if (xB > 0)
     {
-        static uint8_t last_x;
-        static uint8_t last_y;
-        // movement_callback_t f = this->get_movement_callback();
-        // if (f)
-        // {
-        if ((last_x != Joystick_Report.x) || (last_y != Joystick_Report.y))
-        {
-            // (*f)(Joystick_Report.x, Joystick_Report.y);
-            last_x = Joystick_Report.x;
-            last_y = Joystick_Report.y;
-            // Serial.printf("x=%d, y=%d\n", last_x, last_y);
-        }
-        // }
-
-        static uint16_t last_buttons = 0;
-        uint16_t changed = last_buttons ^ Joystick_Report.buttons;
-        uint16_t buttons = Joystick_Report.buttons;
-        for (size_t i = 0; i < 16; i++)
-        {
-            // button_callback_t f = this->get_button_callback(i);
-            if ((changed & 1))
-            {
-                // (*f)(buttons & 1);
-                // Serial.printf("button=%d\n", buttons);
-            }
-            changed >>= 1;
-            buttons >>= 1;
-        }
-        last_buttons = Joystick_Report.buttons;
-
-        deviceNewData = false;
+        lp = yB + xB;
+        rp = yB - xB;
+        lp = lp > 255 ? 255 : lp;
+        rp = rp < -255 ? -255 : rp;
     }
+    else
+    {
+        lp = yB + xB;
+        rp = yB + abs(xB);
+        lp = lp < -255 ? -255 : lp;
+        rp = rp > 255 ? 255 : rp;
+    }
+
+    set_motor_currents(lp, rp);
+
+    // if (deviceNewData)
+    // {
+
+    //     deviceNewData = false;
+    // }
 }
