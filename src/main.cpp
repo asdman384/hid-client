@@ -1,11 +1,12 @@
+// https://lastminuteengineers.com/drv8833-arduino-tutorial/
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 
 // Define the control inputs
-#define MOT_B2_PIN D0 // IN 4
-#define MOT_B1_PIN D1 // IN 3
-#define MOT_A2_PIN D2 // IN 2
-#define MOT_A1_PIN D3 // IN 1
+#define MOT_B2_PIN D3 // IN 4
+#define MOT_B1_PIN D4 // IN 3
+#define MOT_A2_PIN D5 // IN 2
+#define MOT_A1_PIN D6 // IN 1
 
 static const char HID_SERVICE[] = "1812";
 static const char HID_REPORT_MAP[] = "2A4B";
